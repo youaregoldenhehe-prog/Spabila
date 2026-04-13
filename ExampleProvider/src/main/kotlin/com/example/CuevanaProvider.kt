@@ -25,7 +25,6 @@ class CuevanaProvider : MainAPI() {
             Pair("$mainUrl/estrenos/", "Estrenos"),
         )
         
-        // Sección de Series
         try {
             val series = app.get("$mainUrl/serie", timeout = 120).document.select("section.home-series li")
                 .map {
@@ -33,20 +32,12 @@ class CuevanaProvider : MainAPI() {
                     val poster = it.selectFirst("img.lazy")!!.attr("data-src")
                     val url = it.selectFirst("a")!!.attr("href")
                     TvSeriesSearchResponse(
-                        title,
-                        url,
-                        this.name,
-                        TvType.TvSeries,
-                        poster,
-                        null,
-                        null,
-                        null,
+                        title, url, this.name, TvType.TvSeries, poster, null, null, null
                     )
                 }
             items.add(HomePageList("Series", series))
         } catch (e: Exception) { }
 
-        // Sección de Películas y Estrenos
         urls.apmap { (url, name) ->
             try {
                 val soup = app.get(url).document
@@ -56,13 +47,9 @@ class CuevanaProvider : MainAPI() {
                     val poster = it.selectFirst("img.lazy")!!.attr("data-src")
                     
                     if (link.contains("/pelicula/")) {
-                        MovieSearchResponse(
-                            title, link, this.name, TvType.Movie, poster, null
-                        )
+                        MovieSearchResponse(title, link, this.name, TvType.Movie, poster, null)
                     } else {
-                        TvSeriesSearchResponse(
-                            title, link, this.name, TvType.TvSeries, poster, null, null
-                        )
+                        TvSeriesSearchResponse(title, link, this.name, TvType.TvSeries, poster, null, null)
                     }
                 }
                 items.add(HomePageList(name, home))
@@ -81,9 +68,7 @@ class CuevanaProvider : MainAPI() {
             val title = it.selectFirst("h2.Title")!!.text()
             val href = it.selectFirst("a")!!.attr("href")
             val image = it.selectFirst("img.lazy")!!.attr("data-src")
-            val isSerie = href.contains("/serie/")
-
-            if (isSerie) {
+            if (href.contains("/serie/")) {
                 TvSeriesSearchResponse(title, href, this.name, TvType.TvSeries, image, null, null)
             } else {
                 MovieSearchResponse(title, href, this.name, TvType.Movie, image, null)
@@ -91,4 +76,60 @@ class CuevanaProvider : MainAPI() {
         }
     }
 
-    override suspend fun load(url: String): LoadResponse?
+    override suspend fun load(url: String): LoadResponse? {
+        val soup = app.get(url, timeout = 120).document
+        val title = soup.selectFirst("h1.Title")!!.text()
+        val description = soup.selectFirst(".Description p")?.text()?.trim()
+        val poster: String? = soup.selectFirst(".movtv-info div.Image img")!!.attr("data-src")
+        
+        val episodes = soup.select(".all-episodes li.TPostMv article").map { li ->
+            val href = li.select("a").attr("href")
+            val epThumb = li.selectFirst("div.Image img")?.attr("data-src") ?: ""
+            val seasonid = li.selectFirst("span.Year")!!.text().split("x")
+            Episode(
+                href, null, seasonid.getOrNull(0)?.toIntOrNull(), seasonid.getOrNull(1)?.toIntOrNull(), fixUrl(epThumb)
+            )
+        }
+
+        val tvType = if (episodes.isEmpty()) TvType.Movie else TvType.TvSeries
+        return if (tvType == TvType.TvSeries) {
+            newTvSeriesLoadResponse(title, url, tvType, episodes) {
+                this.posterUrl = poster
+                this.plot = description
+            }
+        } else {
+            newMovieLoadResponse(title, url, tvType, url) {
+                this.posterUrl = poster
+                this.plot = description
+            }
+        }
+    }
+
+    data class Femcuevana(@JsonProperty("url") val url: String)
+
+    override suspend fun loadLinks(
+        data: String,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        app.get(data).document.select("div.TPlayer.embed_div iframe").apmap {
+            val iframe = fixUrl(it.attr("data-src"))
+            if (iframe.contains("api.cue-vana3.org/fembed/")) {
+                val key = iframe.split("h=").lastOrNull()
+                if (key != null) {
+                    try {
+                        val response = app.post(
+                            "https://api.cue-vana3.org/fembed/api.php",
+                            data = mapOf("h" to key),
+                            headers = mapOf("X-Requested-With" to "XMLHttpRequest")
+                        ).text
+                        val json = parseJson<Femcuevana>(response)
+                        loadExtractor(json.url, data, subtitleCallback, callback)
+                    } catch (e: Exception) { }
+                }
+            }
+        }
+        return true
+    }
+}
